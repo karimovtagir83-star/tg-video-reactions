@@ -14,8 +14,6 @@ COMMANDS = (
     ("status", "Показать режимы бота"),
     ("talk_on", "Включить обычные ответы"),
     ("talk_off", "Выключить обычные ответы"),
-    ("chat_on", "Синоним команды talk_on"),
-    ("chat_off", "Синоним команды talk_off"),
     ("links_on", "Включить ответы на ссылки"),
     ("links_off", "Выключить ответы на ссылки"),
     ("pause", "Поставить оба режима на паузу"),
@@ -72,8 +70,8 @@ def install_handler(
 
         raw_text = getattr(event, "raw_text", "") or ""
         command = raw_text.strip().split(maxsplit=1)[0].split("@", 1)[0].lower() if raw_text.strip() else ""
-        talk_on = {"/talk_on", "/chat_on"}
-        talk_off = {"/talk_off", "/chat_off"}
+        talk_on = {"/talk_on"}
+        talk_off = {"/talk_off"}
         links_on = {"/links_on"}
         links_off = {"/links_off"}
         if command not in (
