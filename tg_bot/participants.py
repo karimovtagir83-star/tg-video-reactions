@@ -105,7 +105,6 @@ _PARTICIPANT_GENERIC_RE = re.compile(
 )
 _ABOUT_OBJECT_RE = re.compile(
     r"(?iu)\b(?:о|об|обо|про|насч[её]т|about)\s+"
-    r"([\w][\w'’.-]*(?:\s+[\w][\w'’.-]*){0,2})"
 )
 _PRONOUN_ABOUT_OBJECTS = frozenset({
     "я", "мы", "ты", "вы", "он", "она", "оно", "они", "меня", "нас",
@@ -639,6 +638,55 @@ def _participant_reference_forms(alias: str) -> set[str]:
     return result
 
 
+def _participant_question_forms(alias: str) -> set[str]:
+    """Build searchable forms, inflecting Russian names but keeping handles exact."""
+    if alias.strip().startswith("@"):
+        return {alias.strip()}
+    normalized = _normalize_alias(alias)
+    if not normalized:
+        return set()
+    final = normalized.split()[-1]
+    if not re.fullmatch(r"(?iu)[а-яё]+", final):
+        return {normalized}
+    return _participant_reference_forms(alias)
+
+
+def _participant_question_alias_index(artifact: dict | None):
+    """Map searchable alias forms to labels while retaining conflicting forms."""
+    if not isinstance(artifact, dict):
+        return {}, set()
+    participants = artifact.get("participants", {})
+    aliases = artifact.get("aliases", {})
+    duplicate_aliases = set(artifact.get("_ambiguous_aliases", ()))
+    form_targets: dict[str, set[str]] = {}
+    form_text: dict[str, str] = {}
+    ambiguous_forms: set[str] = set()
+
+    def add(alias, label):
+        if not isinstance(alias, str) or not isinstance(label, str):
+            return
+        normalized = _normalize_alias(alias)
+        is_ambiguous = normalized in duplicate_aliases
+        for form in _participant_question_forms(alias):
+            key = " ".join(form.casefold().split())
+            form_text.setdefault(key, form)
+            form_targets.setdefault(key, set()).add(label)
+            if is_ambiguous:
+                ambiguous_forms.add(key)
+
+    if isinstance(participants, dict):
+        for label in participants:
+            add(label, label)
+    if isinstance(aliases, dict):
+        for alias, label in aliases.items():
+            add(alias, label)
+    ambiguous_forms.update(
+        key for key, targets in form_targets.items() if len(targets) > 1
+    )
+    return {key: (form_text[key], targets)
+            for key, targets in form_targets.items()}, ambiguous_forms
+
+
 def participant_reference_matches_sender(
     reference: str, sender, artifact: dict | None,
 ) -> bool:
@@ -695,53 +743,26 @@ def match_participant_question(
     if not text:
         return None
 
-    labels = list((artifact or {}).get("participants", {}))
-    normalized_labels = {}
-    duplicate_normalized = set((artifact or {}).get("_ambiguous_aliases", ()))
-    for label in labels:
-        if isinstance(label, str):
-            normalized = normalize_label(label)
-            if normalized in normalized_labels:
-                duplicate_normalized.add(normalized)
-            else:
-                normalized_labels[normalized] = label
-    alias_targets = dict(normalized_labels)
-    for alias, label in (artifact or {}).get("aliases", {}).items():
-        normalized = _normalize_alias(alias)
-        existing = alias_targets.get(normalized)
-        if existing is not None and existing != label:
-            duplicate_normalized.add(normalized)
-        else:
-            alias_targets[normalized] = label
+    participants = (artifact or {}).get("participants", {})
+    alias_index, ambiguous_forms = _participant_question_alias_index(artifact)
     # A leading name followed by punctuation is normally a vocative (who is
     # asking the bot), not the subject of the question. Strip that form before
     # resolving the named participant.
-    aliases = list((artifact or {}).get("aliases", {}))
-    prefixes = list(dict.fromkeys([*labels, *aliases]))
-    for label in sorted((item for item in prefixes if isinstance(item, str)),
-                        key=len, reverse=True):
-        if len(label) < 2 or label.startswith("@"):
+    for form, _targets in sorted(
+            alias_index.values(), key=lambda item: len(item[0]), reverse=True):
+        if len(form) < 2 or form.startswith("@"):
             continue
-        prefix = re.match(rf"(?iu)^\s*{re.escape(label)}(?=\s*[,!—-])", text)
+        prefix = re.match(rf"(?iu)^\s*{re.escape(form)}(?=\s*[,!—-])", text)
         if prefix is not None:
             text = re.sub(r"^\s*[^,!—-]*[,!—-]\s*", "", text[prefix.end():], count=1)
             break
 
     matches: list[tuple[int, int, str]] = []
-    searchable_aliases = [(label, label) for label in labels if isinstance(label, str)]
-    searchable_aliases.extend(
-        (alias, label) for alias, label in (artifact or {}).get("aliases", {}).items()
-    )
-    seen_search_aliases = set()
-    for alias, label in searchable_aliases:
-        if not isinstance(alias, str) or len(alias) < 2:
+    for form_key, (form, _targets) in alias_index.items():
+        if len(form) < 2:
             continue
-        normalized_alias = _normalize_alias(alias)
-        if normalized_alias in seen_search_aliases:
-            continue
-        seen_search_aliases.add(normalized_alias)
-        boundary = re.compile(rf"(?iu)(?<![\w]){re.escape(alias)}(?![\w])")
-        matches.extend((match.start(), match.end(), label)
+        boundary = re.compile(rf"(?iu)(?<![\w]){re.escape(form)}(?![\w])")
+        matches.extend((match.start(), match.end(), form_key)
                        for match in boundary.finditer(text))
     # Resolve a short label that is a prefix of a longer exact label at the
     # same position, while preserving distinct names elsewhere in the query.
@@ -751,7 +772,14 @@ def match_participant_question(
                for chosen_start, chosen_end, _chosen_label in selected_matches):
             continue
         selected_matches.append((start, end, label))
-    matched = list(dict.fromkeys(label for _start, _end, label in selected_matches))
+    matched_forms = list(dict.fromkeys(
+        form_key for _start, _end, form_key in selected_matches
+    ))
+    matched = list(dict.fromkeys(
+        label for form_key in matched_forms
+        for label in alias_index[form_key][1]
+    ))
+    matched_ambiguous = any(form_key in ambiguous_forms for form_key in matched_forms)
     generic_question = bool(_PARTICIPANT_GENERIC_RE.search(text))
     about_match = _ABOUT_OBJECT_RE.search(text)
     name_question = about_match is not None
@@ -761,11 +789,11 @@ def match_participant_question(
 
     if about_match is not None:
         # The explicit object of "about/o/pro" outranks other names in the
-        # sentence. If it cannot be mapped exactly, ask for clarification and
-        # never fall back to an unrelated single label elsewhere in the text.
-        target = about_match.group(1)
-        target_normalized = _normalize_alias(target)
-        first_target_token = normalize_label(target.split()[0])
+        # sentence. Resolve the longest known alias at the start of the object
+        # so trailing verbs do not get swallowed into a greedy name phrase.
+        object_text = text[about_match.end():]
+        first_token = re.match(r"(?iu)^\s*([\w]+)", object_text)
+        first_target_token = normalize_label(first_token.group(1)) if first_token else ""
         if first_target_token in _PRONOUN_ABOUT_OBJECTS:
             # A pronoun is not a local participant identity. If another exact
             # participant is named, keep the trigger but ask instead of using
@@ -775,34 +803,51 @@ def match_participant_question(
                 ParticipantQuery(True, None) if matched or generic_question
                 else None
             )
-        if target_normalized in duplicate_normalized:
+        target_matches = []
+        for form_key, (form, _targets) in alias_index.items():
+            target_match = re.match(
+                rf"(?iu)^\s*{re.escape(form)}(?![\w])", object_text,
+            )
+            if target_match is not None:
+                target_matches.append((target_match.end(), form_key))
+        if not target_matches:
             return ParticipantQuery(True, None)
-        target_label = alias_targets.get(target_normalized)
-        if target_label is None:
-            return ParticipantQuery(True, None)
-        if any(label == target_label or _normalize_alias(label) == target_normalized
-               for label in matched):
-            if len(matched) == 1 and artifact is not None:
-                return ParticipantQuery(
-                    True,
-                    _validate_summary_record(artifact["participants"][target_label]),
-                    target_label,
-                )
+        longest_target = max(end for end, _form_key in target_matches)
+        target_forms = list(dict.fromkeys(
+            form_key for end, form_key in target_matches if end == longest_target
+        ))
+        target_labels = list(dict.fromkeys(
+            label for form_key in target_forms
+            for label in alias_index[form_key][1]
+        ))
+        if (len(target_labels) == 1
+                and not any(form_key in ambiguous_forms for form_key in target_forms)
+                and not matched_ambiguous
+                and len(matched) == 1
+                and matched[0] == target_labels[0]
+                and isinstance(participants, dict)
+                and target_labels[0] in participants):
+            target_label = target_labels[0]
+            return ParticipantQuery(
+                True, _validate_summary_record(participants[target_label]),
+                target_label,
+            )
         # Another exact name in the same query makes the target ambiguous even
         # when one name appears in an explicit object phrase.
         return ParticipantQuery(True, None)
 
     if matched and len(matched) == 1:
         label = matched[0]
-        if _normalize_alias(label) in duplicate_normalized or artifact is None:
+        if (matched_ambiguous or artifact is None
+                or not isinstance(participants, dict) or label not in participants):
             return ParticipantQuery(True, None)
         # A stripped vocative is never promoted back into the target slot.
         return ParticipantQuery(
-            True, _validate_summary_record(artifact["participants"][label]),
+            True, _validate_summary_record(participants[label]),
             label,
         )
 
-    if matched or generic_question or name_question:
+    if matched or matched_ambiguous or generic_question or name_question:
         return ParticipantQuery(True, None)
     # Pronoun-only questions such as "How do I run it?" and "What do you
     # think of him?" do not establish which group member is being discussed.

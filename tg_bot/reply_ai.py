@@ -44,12 +44,22 @@ SYSTEM = (
     "When a participant_summary is supplied for a participant_question, answer from it "
     "directly. Do not claim you do not know or ask for clarification if it contains usable "
     "observations; give a playful, grounded impression based on the summary. "
+    "When a harmless participant_question has no usable summary because the reference is "
+    "missing or ambiguous, do not guess who is meant or describe anyone. Ask one brief, "
+    "natural clarification that identifies the person or reference; vary the wording and "
+    "make it playful when the surrounding conversation supports that. A clarification is "
+    "a valid reply, so return can_reply=true with reason=ok. Avoid a fixed, repeated "
+    "clarification formula. "
     "If the trigger is a direct taunt about you as an AI and the trigger metadata confirms "
     "it is addressed to this account, answer with a varied playful comeback instead of an "
     "uncertainty line or generic clarification. "
     "Do not request or rely on other summaries or the full archive. If the person or "
     "pronoun is ambiguous, ask who is meant. If information is missing, say so and ask "
-    "one focused question rather than going silent. "
+    "one focused question rather than going silent. If a harmless question is odd or "
+    "unclear, answer with one brief, varied clarification in the owner's conversational "
+    "style, playful when the context supports it. Do not guess what was meant, state "
+    "unsupported facts, or repeat a stock clarification. Return that clarification as a "
+    "reply instead of declining it. "
     "If the trigger directly asks who you are, whether you are Tagir, whether this account "
     "is a real person or a bot, or a similar identity question, answer briefly using the "
     "locally configured bot persona; never claim "
@@ -72,7 +82,12 @@ SYSTEM = (
     "one message marked reply_parent. For owner_action the requester is the authorized "
     "owner; for group_action it is the human who wrote the trigger. Follow the request's "
     "communication goal, use the selected context and participant summary, and return "
-    "only that draft; the local application sends it as a same-group reply. When "
+    "only the actual recipient-facing draft; the local application sends it as a "
+    "same-group reply to the identified participant. Never redirect the requester to "
+    "write or ask the participant themselves, such as 'напиши ему сам/сама' or "
+    "'спроси его сам/сама' / 'сам/сама напиши ему'. Do not return an acknowledgment, "
+    "a promise to send something later, or commentary about carrying out the request. "
+    "Write the message as if speaking directly to the identified participant. When "
     "trigger_reason is conversation, this is a short follow-up after the bot's recent "
     "reply: answer the latest message naturally using the pinned recent bot answer and "
     "selected context, but do not assume the latest message directly addresses you. "
@@ -505,8 +520,46 @@ _GENERIC_FOLLOW_UP_RE = re.compile(
     r"let\s+me\s+know|happy\s+to\s+help)(?:\s+если\s+что)?[.!?…]*)$"
 )
 _PARTICIPANT_UNKNOWN_RE = re.compile(
-    r"(?iu)\b(?:не\s+знаю|не\s+помню|хз|без\s+понятия|"
-    r"информации\s+(?:мало|недостаточно)|ничего\s+не\s+известно)\b"
+    r"(?iu)^\s*(?:не\s+знаю|не\s+помню|хз|без\s+понятия|"
+    r"информации\s+(?:мало|недостаточно)|ничего\s+не\s+известно)"
+    r"[.!?…\s]*$"
+)
+_PARTICIPANT_CLARIFICATION_RE = re.compile(
+    r"(?iu)(?:\b(?:про\s+кого|о\s+ком)(?:\s+именно)?\b|"
+    r"\bкого\s+(?:именно|(?:ты\s+)?имеешь\s+в\s+виду)\b|"
+    r"\bкто(?:\s+(?:(?:именно|конкретно)\s+имеется\s+в\s+виду|"
+    r"именно|конкретно|из\s+них|там|это))?\s*\?|"
+    r"\b(?:which\s+person|who\s+do\s+you\s+mean)\b)"
+)
+_CONTEXT_CLARIFICATION_RE = re.compile(
+    r"(?iu)(?:\b(?:что|чего|чё|кто|кого|кому|как|какой|какая|какие|"
+    r"куда|где|what|who|which|how)\b|"
+    r"\b(?:о\s+ч[её]м|про\s+что|уточни|поясни|что\s+имеешь\s+в\s+виду|what\s+do\s+you\s+mean|"
+    r"what\s+exactly|which\s+one)\b)"
+)
+_CONTEXT_NONUNDERSTANDING_RE = re.compile(
+    r"(?iu)^\s*(?:(?:ахах\w*|хах\w*|лол|кек|хз|ну|слушай|блин|мда|эм|ээ|"
+    r"я\s+ч[её]т|я\s+что-то)[,\s—–:!…-]+){0,2}"
+    r"(?:(?:(?:я\s+)?(?:не\s+(?:(?:совсем|вообще|пока|чуть|особо)\s+)?"
+    r"(?:понимаю|понял(?:а)?|догоняю|въезжаю|врубаюсь|врубился|"
+    r"врубилась|выкупаю|секу|уловил(?:а)?|схватил(?:а)?|разобрался|"
+    r"разобралась|запутался|запуталась))|"
+    r"(?:я\s+)?(?:(?:вообще|совсем)\s+)?ничего\s+не\s+"
+    r"(?:понимаю|понял(?:а)?|догоняю|въезжаю|врубаюсь|врубился|врубилась)|"
+    r"не\s+доходит|не\s+доехало|потерял(?:а)?\s+(?:нить|смысл)|"
+    r"(?:я\s+)?(?:туплю|запутался|запуталась|растерялся|растерялась|"
+    r"в\s+(?:танке|ступоре|тумане)|завис|подвис)|"
+    r"(?:мой\s+)?мозг\s+(?:завис|подвис)|(?:я\s+)?выпал(?:а)?\s+из\s+контекста|"
+    r"не\s+[\wёЁ]+(?:\s+[\wёЁ]+){0,1}\s*[,—–]?\s*(?:"
+    r"о\s+ч[её]м(?:\s+(?:ты|речь|говоришь))?|"
+    r"что\s+ты\s+имеешь\s+в\s+виду|чего\s+ты\s+хочешь))|"
+    r"(?:i(?:'m|\s+am)\s+(?:lost|confused)|i\s+(?:don't|do\s+not)\s+get\s+it|"
+    r"i(?:'m|\s+am)\s+not\s+following|that\s+went\s+over\s+my\s+head))"
+    r"(?:\s+(?:вообще|пока|совсем|чуть|вопрос|мысль|суть|смысл|тут|здесь)|"
+    r"[,—–]?\s*(?:о\s+ч[её]м(?:\s+(?:ты|речь|говоришь))?|"
+    r"что\s+(?:ты\s+[\wёЁ][^.!?…,:\n]{0,59}|происходит)|про\s+что|"
+    r"чего\s+ты\s+хочешь|в\s+ч[её]м\s+дело))?"
+    r"[.!?…]*\s*$"
 )
 _SENSITIVE_RE = re.compile(
     r"(?iu)(?:\b(?:перевод|переведи|деньги|долг|одолжи|на карту|плат[её]ж|"
@@ -566,8 +619,31 @@ def _is_participant_question_reason(reason) -> bool:
     return (
         isinstance(reason, str)
         and (reason == "participant_question"
+             or reason.startswith("participant_question_")
              or "_participant_question_" in reason
              or reason.endswith("_participant_question"))
+    )
+
+
+def _is_participant_clarification(text: str) -> bool:
+    """Accept only a question that asks which participant/reference is meant."""
+    return (
+        isinstance(text, str)
+        and "?" in text
+        and _PARTICIPANT_CLARIFICATION_RE.search(text) is not None
+    )
+
+
+def _is_context_clarification(text: str) -> bool:
+    """Accept a concise generated clarification or conversational confusion quip."""
+    return (
+        isinstance(text, str)
+        and len(text.strip()) <= 180
+        and "\n" not in text
+        and (
+            ("?" in text and _CONTEXT_CLARIFICATION_RE.search(text) is not None)
+            or _CONTEXT_NONUNDERSTANDING_RE.fullmatch(text.strip()) is not None
+        )
     )
 
 
@@ -693,8 +769,57 @@ REPLY_VALIDATION_FAILURE_CODES = frozenset({
     "sensitive_commitment", "owner_nickname_not_allowed",
     "owner_familiar_vocative_not_allowed", "insult_without_verified_attack",
     "profanity_without_verified_attack", "directed_expletive",
+    "action_meta_response",
     "mild_tease_without_context", "model_declined",
 })
+
+_ACTION_META_PROMISE_RE = re.compile(
+    r"(?iu)^\s*(?:(?:да|ага|ок(?:ей)?|хорошо|конечно|понял[а]?|"
+    r"без\s+проблем|давай)[,!\s]+)?(?:я\s+)?"
+    r"(?:(?:обязательно|сейчас|щас|позже|потом|завтра|скоро|тогда|"
+    r"ему|ей|им)\s+){0,3}"
+    r"(?:напишу|отвечу|скажу|спрошу|передам|перешлю)"
+    r"(?:\s+(?:ему|ей|им|тебе|вам|сейчас|позже|потом|завтра|скоро|"
+    r"тогда))*[.!…]*\s*$"
+)
+_ACTION_META_REFUSAL_RE = re.compile(
+    r"(?iu)^\s*(?:извини[, ]+)?(?:я\s+)?(?:не\s+(?:могу|буду|хочу|"
+    r"стану|собираюсь|готов[а]?)\s+(?:ему\s+|ей\s+|им\s+|"
+    r"тебе\s+|вам\s+)?(?:ответить|отвечать|написать|писать|сказать|"
+    r"спросить|отправить)|не\s+знаю[, ]+(?:что\s+)?"
+    r"(?:ему|ей|им)\s+(?:ответить|написать|сказать|спросить))\b"
+)
+_ACTION_META_REDIRECT_RE = re.compile(
+    r"(?iu)^\s*(?:(?:нет|ну|может)[, ]+)?(?:"
+    r"(?:сам|сама|сами|самостоятельно)\s+"
+    r"(?:ему|ей|им|его|её|ее|их|у\s+него|у\s+неё|у\s+нее)\s+"
+    r"(?:напиши(?:те)?|пиши(?:те)?|ответь(?:те)?|отвечай(?:те)?|"
+    r"спроси(?:те)?|спрашивай(?:те)?|скажи(?:те)?)|"
+    r"(?:напиши(?:те)?|пиши(?:те)?|ответь(?:те)?|отвечай(?:те)?|"
+    r"спроси(?:те)?|спрашивай(?:те)?|скажи(?:те)?)\s+"
+    r"(?:ему|ей|им|его|её|ее|их|у\s+него|у\s+неё|у\s+нее)\s+"
+    r"(?:сам|сама|сами|самостоятельно)|"
+    r"(?:сам|сама|сами|самостоятельно)\s+"
+    r"(?:напиши(?:те)?|пиши(?:те)?|ответь(?:те)?|отвечай(?:те)?|"
+    r"спроси(?:те)?|спрашивай(?:те)?|скажи(?:те)?)\s+"
+    r"(?:ему|ей|им|его|её|ее|их)|"
+    r"пусть\s+(?:(?:он|она|они|ты)\s+)?(?:сам|сама|сами)\s+"
+    r"(?:ему|ей|им|его|её|ее|их)\s+"
+    r"(?:напишет|ответит|спросит|скажет|напишешь|ответишь|спросишь|скажешь)"
+    r")\b"
+)
+
+
+def _is_action_meta_response(text: str) -> bool:
+    """Identify action promises, refusals, and requester redirects, not drafts."""
+    if not isinstance(text, str):
+        return False
+    normalized = " ".join(text.split()).strip()
+    return bool(normalized and (
+        _ACTION_META_PROMISE_RE.fullmatch(normalized)
+        or _ACTION_META_REFUSAL_RE.search(normalized)
+        or _ACTION_META_REDIRECT_RE.search(normalized)
+    ))
 
 # These failures can be repaired without ever echoing the rejected draft back
 # into the prompt. Safety-critical refusals stop immediately.
@@ -703,7 +828,7 @@ REPAIRABLE_VALIDATION_FAILURES = frozenset({
     "unsafe_markup", "owner_nickname_not_allowed",
     "owner_familiar_vocative_not_allowed", "insult_without_verified_attack",
     "profanity_without_verified_attack", "directed_expletive",
-    "mild_tease_without_context", "model_declined",
+    "mild_tease_without_context", "model_declined", "action_meta_response",
 })
 
 
@@ -847,13 +972,16 @@ def validate_follow_up_text(
 
 def _validation_options(
     window: dict, owner_nicknames: tuple[str, ...] = (),
+    *, allow_owner_style_lexicon: bool = False,
 ) -> dict[str, object]:
     allow_mild_casual_style = _clearly_casual_window(window)
     reason = window.get("trigger_reason", "")
     reason_parts = set(reason.split("_")) if isinstance(reason, str) else set()
     allow_configured_style_words = (
-        not _is_participant_question_reason(reason)
-        and (allow_mild_casual_style or _reply_targets_owner(window))
+        allow_owner_style_lexicon
+        or _is_participant_question_reason(reason)
+        or allow_mild_casual_style
+        or _reply_targets_owner(window)
     )
     allow_strong_profanity = _owner_directed_attack(window)
     owner_addressed = bool(reason_parts & _OWNER_ADDRESS_REASONS)
@@ -945,6 +1073,14 @@ async def _generate_once(key: str, model: str, payload: dict) -> object | None:
                 "do not repeat unsafe material. Keep all URL, contact, private-data, "
                 "threat, protected-slur, and sensitive-commitment rules in force."
             )
+            if repair_category == "action_meta_response":
+                repair_instruction += (
+                    " This is an owner_action/group_action: write the actual message "
+                    "to the identified participant as the text field. Do not address "
+                    "the requester, tell them to write or ask the participant, promise "
+                    "to send it later, or describe the task. Return only the "
+                    "recipient-facing draft."
+                )
             if include_attack:
                 repair_instruction += (
                     " The selected trigger is a confirmed direct personal attack: answer it "
@@ -1039,29 +1175,10 @@ async def generate_reply(
         if persona_variants:
             identity_persona = random.choice(persona_variants)
     participant_trigger = _is_participant_question_reason(trigger_reason)
-
-    def participant_summary_fallback():
-        if not participant_trigger or safe_participant_summary is None:
-            return None
-        fragments = re.split(r"(?<=\.)\s+", safe_participant_summary)
-        selected = next(
-            (item for item in fragments if item.startswith("По переписке:")),
-            next((item for item in fragments
-                  if item.startswith("В сообщениях этого участника")),
-                 fragments[0] if fragments else ""),
-        )
-        if len(selected) > 350:
-            clipped = selected[:347].rsplit(" ", 1)[0].rstrip(" ,;:")
-            selected = (clipped or selected[:347]) + "…"
-        if not selected:
-            return None
-        text, failure = _format_validated_text(
-            selected, _validation_options(safe_window, safe_recipient_vocatives),
-        )
-        return ReplyResult(text, "ok") if text and not failure else None
+    action_trigger = trigger_reason in {"owner_action", "group_action"}
 
     def unavailable_result(reason):
-        return participant_summary_fallback() or ReplyResult(None, reason)
+        return ReplyResult(None, reason)
 
     payload = {"style_profile": safe_profile, "conversation_window": safe_window}
     if identity_persona:
@@ -1098,34 +1215,52 @@ async def generate_reply(
 
     def evaluate(candidate: OrdinaryReply):
         owner_attack = _owner_directed_attack(safe_window)
+        if (action_trigger and (
+                candidate.reason == "unclear"
+                or _is_action_meta_response(candidate.text))):
+            return None, "action_meta_response"
+        if candidate.reason == "unclear":
+            if owner_attack or identity_question:
+                return None, "model_declined"
+            if participant_trigger:
+                if (safe_participant_summary is not None
+                        or not _is_participant_clarification(candidate.text)):
+                    return None, "model_declined"
+            elif not _is_context_clarification(candidate.text):
+                return None, "model_declined"
+            text, failure = _format_validated_text(
+                candidate.text,
+                _validation_options(
+                    safe_window, safe_recipient_vocatives,
+                    allow_owner_style_lexicon=True,
+                ),
+            )
+            if failure:
+                return None, failure
+            return ReplyResult(text, "ok"), None
         if not candidate.can_reply:
             if (owner_attack or identity_question
                     or safe_participant_summary is not None):
                 return None, "model_declined"
             if candidate.reason == "needs_owner":
                 return None, "model_declined"
-            if candidate.reason == "unclear":
-                reason = safe_window.get("trigger_reason", "")
-                if participant_trigger:
-                    if safe_participant_summary is not None:
-                        return None, "model_declined"
-                    text, failure = _format_validated_text(
-                        "В выбранном контексте фактов пока мало. Что именно уточнить про этого участника?",
-                        _validation_options(safe_window, safe_recipient_vocatives),
-                    )
-                    if failure:
-                        return None, failure
-                    return ReplyResult(text, "ok"), None
-                return ReplyResult(None, "context_unclear"), None
             return ReplyResult(None, "unsuitable_content"), None
-        options = _validation_options(safe_window, safe_recipient_vocatives)
         if candidate.reason != "ok":
             return None, "model_declined"
-        reason = safe_window.get("trigger_reason", "")
-        participant_trigger = _is_participant_question_reason(reason)
+        if (participant_trigger and safe_participant_summary is None
+                and not _is_participant_clarification(candidate.text)):
+            return None, "model_declined"
         if (participant_trigger and safe_participant_summary is not None
                 and _PARTICIPANT_UNKNOWN_RE.search(candidate.text)):
             return None, "model_declined"
+        options = _validation_options(
+            safe_window, safe_recipient_vocatives,
+            allow_owner_style_lexicon=(
+                _is_context_clarification(candidate.text)
+                or (participant_trigger and safe_participant_summary is None
+                    and _is_participant_clarification(candidate.text))
+            ),
+        )
         if identity_question and identity_persona:
             previous_self = [
                 item.get("text", "") for position, item in enumerate(
@@ -1187,9 +1322,6 @@ async def generate_reply(
     if retry_failure is None:
         # A genuine unclear/needs-owner result remains its own safe outcome.
         return repaired
-    summary_reply = participant_summary_fallback()
-    if summary_reply is not None:
-        return summary_reply
     return ReplyResult(
         None, f"reply_validation_retry_failed_{validation_failure}_{retry_failure}",
     )

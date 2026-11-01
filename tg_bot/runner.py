@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from telethon import events
-from telethon.tl.types import User
+from telethon.tl.types import MessageEntityMention, User
 
 from .telegram import ROOT, client
 from .links import extract_urls, supported_url, has_url_candidate
@@ -92,6 +92,71 @@ ORDINARY_FALLBACK_REASON_CODES = frozenset({
 _OWNER_ACTION_CLARIFICATION = (
     "Кому ответить? Пришли команду ответом на его сообщение или на мой ответ ему."
 )
+_ACTION_STOP_RE = re.compile(
+    r"(?iu)^\s*(?:"
+    r"(?:ну\s+)?(?:стоп|отмена|пауза|подожди|погоди)(?:$|[,!.?…])|"
+    r"(?:отмени|отменяю|останови(?:сь)?|приостанови|передумал[а]?)(?:\b|$)|"
+    r"(?:нет[, ]+)?(?:лучше\s+)?(?:перепиши|исправь|поправь|переформулируй|"
+    r"переделай|поменяй|замени|измени|напиши\s+иначе|ответь\s+иначе|"
+    r"ответь\s+(?:короче|кратко)|скажи\s+короче|"
+    r"сделай\s+(?:покороче|короче|иначе))\b|"
+    r"(?:пожалуйста[, ]+)?(?:пока\s+)?не\s+(?:надо\s+)?"
+    r"(?:отправляй|отправлять|пиши|писать|отвечай|отвечать)\b|"
+    r"не\s+(?:надо|нужно)\s*[.!?…]*$"
+    r")"
+)
+_ACTION_META_RESPONSE_RE = re.compile(
+    r"(?iu)^\s*(?:(?:да|ага|ок(?:ей)?|хорошо|конечно|понял[а]?|"
+    r"без\s+проблем|давай)[,!\s]+)?(?:я\s+)?"
+    r"(?:(?:обязательно|сейчас|щас|позже|потом|завтра|скоро|тогда|"
+    r"ему|ей|им)\s+){0,3}"
+    r"(?:напишу|отвечу|скажу|спрошу|передам|перешлю)"
+    r"(?:\s+(?:ему|ей|им|тебе|вам|сейчас|завтра|позже|потом|скоро|"
+    r"тогда|сам|сама|сами))*"
+    r"[.!…]*\s*$"
+)
+_ACTION_META_REFUSAL_RE = re.compile(
+    r"(?iu)^\s*(?:извини[, ]+)?(?:я\s+)?(?:не\s+(?:могу|буду|хочу|"
+    r"стану)\s+(?:ему\s+|ей\s+|им\s+|тебе\s+|вам\s+)?"
+    r"(?:ответить|отвечать|написать|писать|сказать|спросить|отправить)|"
+    r"не\s+знаю[, ]+(?:что\s+)?(?:ему|ей|им)\s+"
+    r"(?:ответить|написать|сказать|спросить))\b"
+)
+_ACTION_META_REDIRECT_RE = re.compile(
+    r"(?iu)^\s*(?:(?:нет|ну|может)[, ]+)?(?:"
+    r"(?:сам|сама|сами|самостоятельно)\s+"
+    r"(?:ему|ей|им|его|её|ее|их|у\s+него|у\s+неё|у\s+нее)\s+"
+    r"(?:напиши(?:те)?|пиши(?:те)?|ответь(?:те)?|отвечай(?:те)?|"
+    r"спроси(?:те)?|спрашивай(?:те)?|скажи(?:те)?)|"
+    r"(?:напиши(?:те)?|пиши(?:те)?|ответь(?:те)?|отвечай(?:те)?|"
+    r"спроси(?:те)?|спрашивай(?:те)?|скажи(?:те)?)\s+"
+    r"(?:ему|ей|им|его|её|ее|их|у\s+него|у\s+неё|у\s+нее)\s+"
+    r"(?:сам|сама|сами|самостоятельно)|"
+    r"(?:сам|сама|сами|самостоятельно)\s+"
+    r"(?:напиши(?:те)?|пиши(?:те)?|ответь(?:те)?|отвечай(?:те)?|"
+    r"спроси(?:те)?|спрашивай(?:те)?|скажи(?:те)?)\s+"
+    r"(?:ему|ей|им|его|её|ее|их)|"
+    r"пусть\s+(?:(?:он|она|они|ты)\s+)?(?:сам|сама|сами)\s+"
+    r"(?:ему|ей|им|его|её|ее|их)\s+"
+    r"(?:напишет|ответит|спросит|скажет|напишешь|ответишь|спросишь|скажешь)"
+    r")\b"
+)
+
+
+def _is_explicit_action_stop(text):
+    """Match a follow-up that clearly cancels, pauses, or edits a queued action."""
+    normalized = " ".join(str(text or "").split()).strip()
+    return bool(normalized and _ACTION_STOP_RE.search(normalized))
+
+
+def _is_action_meta_response(text):
+    """Reject a generated promise/refusal about doing the requested reply."""
+    normalized = " ".join(str(text or "").split()).strip()
+    return bool(normalized and (
+        _ACTION_META_RESPONSE_RE.fullmatch(normalized)
+        or _ACTION_META_REFUSAL_RE.search(normalized)
+        or _ACTION_META_REDIRECT_RE.search(normalized)
+    ))
 
 
 @dataclass(frozen=True)
@@ -105,6 +170,7 @@ class ActionRequest:
     trigger_reason: str
     generation: tuple[int, int]
     deadline: float
+    recipient_username: str | None = None
 
 
 def _is_owner_reply_command(text, aliases=(), artifact=None):
@@ -558,8 +624,11 @@ async def run(cfg, send=False, show_drafts=False):
                 task.cancel()
 
     def cancel_owner_actions_after_owner_message(
-        chat_id, thread_id, message_id, sender_id,
+        chat_id, thread_id, message_id, sender_id, message_text,
     ):
+        if (sender_id is None or sender_id == own_id
+                or not _is_explicit_action_stop(message_text)):
+            return
         key = (int(chat_id), int(thread_id))
         actions = owner_actions_by_thread.get(key, {})
         owner_ids = set(getattr(cfg, "owner_command_sender_ids", ()) or ())
@@ -571,6 +640,21 @@ async def run(cfg, send=False, show_drafts=False):
                     and (sender_id == requester_id or sender_id in owner_ids)
                     and not task.done()):
                 task.cancel()
+
+    def owner_action_cancelled_by_followup(
+        chat_id, thread_id, command_id, requester_id,
+    ):
+        cancel_senders = set(
+            getattr(cfg, "owner_command_sender_ids", ()) or ()
+        ) | {int(requester_id)}
+        cancel_senders.discard(own_id)
+        return any(
+            item.message_id > int(command_id)
+            and item.sender_id in cancel_senders
+            and item.sender_id != own_id and not item.own
+            and _is_explicit_action_stop(item.text)
+            for item in context.messages(int(chat_id), int(thread_id))
+        )
 
     def on_ordinary_toggle(enabled):
         if enabled:
@@ -799,23 +883,26 @@ async def run(cfg, send=False, show_drafts=False):
                 raise
             except Exception:
                 return None
-            if (sender is None or getattr(sender, "bot", False)
+            if (not isinstance(sender, User) or getattr(sender, "bot", False)
                     or getattr(sender, "id", None) != target_sender_id):
                 return None
             summary = participant_summary_for_sender(
                 sender, participant_artifact(chat_id),
             )
-            return target_id, target_sender_id, snapshot, summary
+            username = getattr(sender, "username", None)
+            if (not isinstance(username, str)
+                    or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username)):
+                username = None
+            return target_id, target_sender_id, snapshot, summary, username
 
         async def resolve_named_recipient(label):
             artifact = participant_artifact(chat_id)
-            before = max(0, int(getattr(cfg, "reply_context_before", 5)))
-            after = max(0, int(getattr(cfg, "reply_context_after", 3)))
             recent = [
                 item for item in context.messages(chat_id, thread_id)
                 if item.message_id < int(command.id)
-                and item.text and valid_snapshot(item)
-            ][-max(10, before + after + 2):]
+                and item.sender_id is not None and item.text
+                and valid_snapshot(item)
+            ]
             sender_ids = tuple(dict.fromkeys(item.sender_id for item in recent))
 
             async def lookup_sender(sender_id):
@@ -838,19 +925,29 @@ async def run(cfg, send=False, show_drafts=False):
                 *(lookup_sender(sender_id) for sender_id in sender_ids),
                 return_exceptions=True,
             )
-            if any(sender is None or isinstance(sender, BaseException)
-                   for sender in senders):
-                return None
+            lookup_incomplete = any(
+                sender is None or isinstance(sender, BaseException)
+                for sender in senders
+            )
             words = label.split()
             for count in range(min(5, len(words)), 0, -1):
                 candidate = " ".join(words[:count]).strip(" ,.!?;:—–-")
                 if participant_reference_is_ambiguous(candidate, artifact):
                     return None
+                # A locally unique profile alias or explicit @username remains
+                # identifiable when unrelated senders fail lookup. An unknown
+                # display-name fallback does not: failed senders could share it.
+                if (lookup_incomplete
+                        and participant_label_for_reference(candidate, artifact) is None
+                        and not candidate.startswith("@")):
+                    return None
                 matching_senders = {
                     sender_id for sender_id, sender in zip(sender_ids, senders)
-                    if sender is not False and participant_reference_matches_sender(
-                        candidate, sender, artifact,
-                    )
+                    if (sender is not None and sender is not False
+                        and not isinstance(sender, BaseException)
+                        and participant_reference_matches_sender(
+                            candidate, sender, artifact,
+                        ))
                 }
                 if not matching_senders:
                     continue
@@ -884,9 +981,9 @@ async def run(cfg, send=False, show_drafts=False):
                     or getattr(question, "fwd_from", None) is not None):
                 return None
 
-            # An owner question that itself replies to the participant is the
-            # strongest source. Otherwise search only the question's frozen
-            # same-thread window and require one uniquely identified sender.
+            # A direct reply is the strongest source. The broader local buffer
+            # is used only to identify the sender; the model still receives its
+            # fixed, selected context window below.
             if question_snapshot.reply_to_id is not None:
                 direct_snapshot = context_snapshot(
                     chat_id, thread_id, question_snapshot.reply_to_id,
@@ -899,28 +996,21 @@ async def run(cfg, send=False, show_drafts=False):
                                 direct_sender = await direct.get_sender()
                         except Exception:
                             direct_sender = None
-                        if (participant_label_for_sender(direct_sender, artifact)
+                        if (isinstance(direct_sender, User)
+                                and participant_label_for_sender(direct_sender, artifact)
                                 == query.label):
                             verified = await verify_target(direct, direct_snapshot)
                             if verified is not None:
                                 return verified
 
+            # Recipient resolution may inspect all buffered messages in this
+            # same thread without expanding the separate Gemini context window.
             frozen = [
                 item for item in context.messages(chat_id, thread_id)
-                if item.message_id < int(command.id)
+                if item.message_id < int(bot_reply_id)
             ]
-            before = max(0, int(getattr(cfg, "reply_context_before", 5)))
-            after = max(0, int(getattr(cfg, "reply_context_after", 3)))
-            prior_items = [item for item in frozen
-                           if item.message_id < question_snapshot.message_id]
-            previous = prior_items[-before:] if before else []
-            following = [item for item in frozen
-                         if question_snapshot.message_id < item.message_id <= int(bot_reply_id)][:after]
-            selected = previous + [question_snapshot] + following
-            while len(selected) > 10:
-                selected.pop(0)
             candidates = [
-                item for item in selected
+                item for item in frozen
                 if item.message_id != question_snapshot.message_id
                 and item.sender_id is not None and item.sender_id not in owner_actor_ids
                 and not item.own and item.text
@@ -947,8 +1037,6 @@ async def run(cfg, send=False, show_drafts=False):
                     *(sender_matches(sender_id) for sender_id in sender_ids),
                     return_exceptions=True,
                 )
-                if any(result is not True and result is not False for result in matched):
-                    return None
                 matching_senders = {
                     sender_id for sender_id, result in zip(sender_ids, matched)
                     if result is True
@@ -1083,6 +1171,7 @@ async def run(cfg, send=False, show_drafts=False):
         text = _OWNER_ACTION_CLARIFICATION
         reply_to_id = int(command_id)
         action_target = None
+        send_username = None
 
         def finish_skip(reason, *, final_status="skip"):
             nonlocal reservation_active
@@ -1151,6 +1240,9 @@ async def run(cfg, send=False, show_drafts=False):
                     finish_skip("owner_action_generation_declined")
                     return
                 text = result.text
+                if _is_action_meta_response(text):
+                    finish_skip("owner_action_meta_response")
+                    return
 
             if loop.time() >= deadline:
                 finish_skip("owner_action_deadline")
@@ -1188,6 +1280,7 @@ async def run(cfg, send=False, show_drafts=False):
                     return
                 gate_wait = False
                 flood_wait = False
+                send_username = None
                 try:
                     if send_not_before > waited_gate:
                         gate_wait = True
@@ -1197,13 +1290,8 @@ async def run(cfg, send=False, show_drafts=False):
                     elif not ev.is_group or chat_id not in cfg.chats:
                         finish_skip("owner_action_send_guard")
                         return
-                    elif any(
-                        item.message_id > int(command_id)
-                        and item.sender_id in (
-                            set(getattr(cfg, "owner_command_sender_ids", ()))
-                            | {own_id, requester_sender_id}
-                        )
-                        for item in context.messages(chat_id, thread_id)
+                    elif owner_action_cancelled_by_followup(
+                        chat_id, thread_id, command_id, requester_sender_id,
                     ):
                         finish_skip("owner_action_requester_followup", final_status="cancelled")
                         return
@@ -1237,6 +1325,25 @@ async def run(cfg, send=False, show_drafts=False):
                                     or getattr(current_target, "fwd_from", None) is not None):
                                 finish_skip("owner_action_target_changed")
                                 return
+                            send_username = None
+                            if action_target.recipient_username:
+                                try:
+                                    async with asyncio.timeout(lookup_budget(deadline)):
+                                        current_sender = await current_target.get_sender()
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    current_sender = None
+                                current_username = getattr(
+                                    current_sender, "username", None,
+                                )
+                                if (isinstance(current_sender, User)
+                                        and not getattr(current_sender, "bot", False)
+                                        and getattr(current_sender, "id", None)
+                                        == action_target.target_sender_id
+                                        and current_username
+                                        == action_target.recipient_username):
+                                    send_username = action_target.recipient_username
                         if (loop.time() >= deadline
                                 or not ordinary_generation_is_active(generation)):
                             finish_skip(
@@ -1279,11 +1386,22 @@ async def run(cfg, send=False, show_drafts=False):
                                 sending_started = False
                                 gate_wait = True
                             else:
+                                formatting_entities = None
+                                outbound_text = text
+                                if send_username:
+                                    mention = "@" + send_username
+                                    if len(outbound_text) + len(mention) + 1 <= 350:
+                                        outbound_text = mention + " " + outbound_text
+                                        formatting_entities = [MessageEntityMention(
+                                            offset=0, length=len(mention),
+                                        )]
                                 try:
                                     async with asyncio.timeout_at(deadline):
                                         sent_message = await telegram.send_message(
-                                            chat_id, text, reply_to=reply_to_id,
-                                            parse_mode=None, link_preview=False,
+                                            chat_id, outbound_text, reply_to=reply_to_id,
+                                            parse_mode=None,
+                                            formatting_entities=formatting_entities,
+                                            link_preview=False,
                                         )
                                     try:
                                         outbound_id = int(getattr(sent_message, "id"))
@@ -2097,7 +2215,8 @@ async def run(cfg, send=False, show_drafts=False):
         if resolved is None:
             state.finish_owner_action(chat_id, command_id, "ambiguous")
         else:
-            target_id, target_sender_id, _target_snapshot, summary = resolved
+            (target_id, target_sender_id, _target_snapshot, summary,
+             recipient_username) = resolved
             trigger_snapshot = snapshot_from_message(message, chat_id, own_id)
             relationship = (
                 summary.get("relationship", {})
@@ -2119,18 +2238,14 @@ async def run(cfg, send=False, show_drafts=False):
             request = ActionRequest(
                 command_id, chat_id, thread_id, target_id, target_sender_id,
                 requester_sender_id, trigger_reason,
-                tuple(generation), float(deadline),
+                tuple(generation), float(deadline), recipient_username,
             )
 
         # A requester or an authorized owner may cancel while the target is
         # being resolved. Check the frozen same-thread buffer before creating
         # a worker so a later message cannot race into an outbound reply.
-        cancel_senders = set(
-            getattr(cfg, "owner_command_sender_ids", ()) or ()
-        ) | {requester_id}
-        if any(item.message_id > command_id
-               and item.sender_id in cancel_senders
-               for item in context.messages(chat_id, thread_id)):
+        if owner_action_cancelled_by_followup(
+                chat_id, thread_id, command_id, requester_id):
             state.status(chat_id, command_id, "skip")
             state.finish_owner_action(chat_id, command_id, "cancelled")
             _log_ordinary("owner_action_requester_followup", task_id)
@@ -2373,6 +2488,7 @@ async def run(cfg, send=False, show_drafts=False):
             if sender_id != own_id:
                 cancel_owner_actions_after_owner_message(
                     ev.chat_id, thread_key(message), int(message.id), sender_id,
+                    message.message or "",
                 )
             if getattr(message, "out", False) or getattr(message, "sender_id", None) == own_id:
                 return
