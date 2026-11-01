@@ -1,0 +1,5 @@
+telethon>=1.45,<2
+google-genai>=1.0,<2
+pydantic>=2.10,<3
+python-dotenv>=1.0,<2
+yt-dlp[default]>=2025.1

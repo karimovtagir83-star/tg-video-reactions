@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram video link reactions
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@@BOT_USER@@
+WorkingDirectory=@@BOT_DIR@@
+EnvironmentFile=@@BOT_DIR@@/.env
+Environment=PATH=@@BOT_HOME@@/.local/bin:@@BOT_HOME@@/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@@BOT_DIR@@/.venv/bin/python -m tg_bot run --send
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

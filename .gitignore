@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.venv/
+data/
+data/style/owners.json
+style/owners.json
+*.session*
+*.log
+__pycache__/
+.pytest_cache/
