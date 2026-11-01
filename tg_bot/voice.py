@@ -43,6 +43,15 @@ _PROMPT_WORD_KEYS = (
 )
 _ATTACK_PROMPT_KEYS = ("attack_words", "attack_phrases")
 _WORD_RE = re.compile(r"[^\W\d_]+(?:['’\-][^\W\d_]+)*\Z", re.UNICODE)
+_CYRILLIC_LATIN_SKELETON = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d",
+    "е": "e", "ё": "yo", "ж": "zh", "з": "z", "и": "i",
+    "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+    "о": "o", "п": "p", "р": "r", "с": "s", "т": "t",
+    "у": "u", "ф": "f", "х": "kh", "ц": "ts", "ч": "ch",
+    "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "",
+    "э": "e", "ю": "yu", "я": "ya",
+})
 _PHRASE_RE = re.compile(
     r"[^\W\d_]+(?:['’\-][^\W\d_]+)*(?:\s+[^\W\d_]+(?:['’\-][^\W\d_]+)*){1,4}\Z",
     re.UNICODE,
@@ -331,6 +340,57 @@ def _recent_use_counts(value: str, recent_messages: list[str]) -> tuple[int, int
             break
         consecutive_count += 1
     return recent_count, consecutive_count
+
+
+def canonicalize_mixed_script_lexicon(text: str, config: dict | None = None) -> str:
+    """Restore configured spellings when a generated word mixes Cyrillic and Latin."""
+    if not isinstance(text, str):
+        return text
+    config = validate_voice_config(config if config is not None else load_voice_config())
+
+    def skeleton(value: str) -> str:
+        return "".join(
+            "r" if char.casefold() == "p" else char.casefold().translate(
+                _CYRILLIC_LATIN_SKELETON,
+            )
+            for char in value
+        )
+
+    def has_script(value: str, name: str) -> bool:
+        return any(name in unicodedata.name(char, "") for char in value)
+
+    canonical: dict[str, set[str]] = {}
+    lexicon = config.get("lexicon", {})
+    if isinstance(lexicon, dict):
+        for values in lexicon.values():
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                for word in re.findall(r"[^\W\d_]+(?:['’\-][^\W\d_]+)*", value):
+                    if has_script(word, "CYRILLIC"):
+                        canonical.setdefault(skeleton(word), set()).add(word)
+    unique = {key: next(iter(words)) for key, words in canonical.items() if len(words) == 1}
+    if not unique:
+        return text
+
+    token_pattern = re.compile(r"[^\W\d_]+(?:['’\-][^\W\d_]+)*", re.UNICODE)
+
+    def replace(match):
+        source = match.group()
+        if not (has_script(source, "CYRILLIC") and has_script(source, "LATIN")):
+            return source
+        target = unique.get(skeleton(source))
+        if target is None:
+            return source
+        if source.isupper():
+            return target.upper()
+        if source[:1].isupper():
+            return target[:1].upper() + target[1:]
+        return target
+
+    return token_pattern.sub(replace, text)
 
 
 def _rotate_vocabulary(values: list[str], recent_messages: list[str], seed: str) -> list[str]:

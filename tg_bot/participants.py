@@ -687,6 +687,31 @@ def _participant_question_alias_index(artifact: dict | None):
             for key, targets in form_targets.items()}, ambiguous_forms
 
 
+def begins_with_participant_address(text: str, artifact: dict | None) -> bool:
+    """Recognize a locally known participant name used as a group vocative."""
+    if not isinstance(text, str) or not isinstance(artifact, dict):
+        return False
+    text = unicodedata.normalize("NFC", _QUOTE_RE.sub(" ", text))
+    text = _URL_RE.sub(" ", _EMAIL_RE.sub(" ", text))
+    text = re.sub(r"\s+", " ", text).casefold().replace("ё", "е").strip()
+    if not text:
+        return False
+    alias_index, ambiguous_forms = _participant_question_alias_index(artifact)
+    for form_key, (form, targets) in sorted(
+            alias_index.items(), key=lambda item: len(item[1][0]), reverse=True):
+        if (form_key in ambiguous_forms or len(targets) != 1
+                or not isinstance(form, str) or len(form) < 2):
+            continue
+        pattern = re.compile(
+            r"(?iu)^\s*(?:(?:ну|а|эй|слушай)\s*[,!—–-]?\s*)?"
+            + re.escape(form)
+            + r"(?=$|[\s,!?…:;—–-])"
+        )
+        if pattern.search(text):
+            return True
+    return False
+
+
 def participant_reference_matches_sender(
     reference: str, sender, artifact: dict | None,
 ) -> bool:

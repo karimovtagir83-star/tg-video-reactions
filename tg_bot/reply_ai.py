@@ -18,7 +18,8 @@ from .style import profile_for_api
 from .triggers import _AI_TERM, is_direct_identity_question
 from .voice import (
     compile_phrases, compile_vocative_elongations, compile_words,
-    apply_typography, apply_word_replacements, load_voice_config, private_voice_prompt,
+    apply_typography, apply_word_replacements, canonicalize_mixed_script_lexicon,
+    load_voice_config, private_voice_prompt,
 )
 from .stickers import is_valid_sticker_emoji
 
@@ -1041,6 +1042,7 @@ def _validation_options(
 def _format_validated_text(text: str, options: dict[str, bool]):
     """Validate before and after local typography so formatting cannot hide data."""
     voice_config = load_voice_config()
+    text = canonicalize_mixed_script_lexicon(text, voice_config)
     text = apply_word_replacements(text, voice_config)
     text = _strip_unapproved_nickname_vocatives(text, options)
     normalized, failure = _validate_reply_text(text, **options)

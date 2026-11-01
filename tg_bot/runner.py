@@ -37,6 +37,7 @@ from .stickers import (
     StickerPackCatalog as RecentStickerCatalog, sticker_document_key,
 )
 from .participants import (
+    begins_with_participant_address,
     combine_participant_artifacts, load_private_participant_summaries,
     match_participant_question,
     participant_label_for_reference, participant_label_for_sender,
@@ -400,6 +401,7 @@ async def run(cfg, send=False, show_drafts=False):
     ] = {}
     owner_action_requesters: dict[tuple[int, int, int], int] = {}
     followup_sessions: dict[tuple[int, int], tuple[float, int]] = {}
+    other_participant_conversation_anchors: dict[tuple[int, int], int] = {}
     collecting_ordinary: set[asyncio.Task] = set()
     started_ordinary: set[asyncio.Task] = set()
     ordinary_by_thread: dict[
@@ -614,6 +616,7 @@ async def run(cfg, send=False, show_drafts=False):
 
     def cancel_ordinary_for_pause():
         followup_sessions.clear()
+        other_participant_conversation_anchors.clear()
         for task in tuple(active_ordinary | active_owner_actions):
             if not task.done():
                 task.cancel()
@@ -789,11 +792,15 @@ async def run(cfg, send=False, show_drafts=False):
         expires_at, message_id = session
         if asyncio.get_running_loop().time() >= expires_at:
             followup_sessions.pop(key, None)
+            other_participant_conversation_anchors.pop(key, None)
             return None
         snapshot = context_snapshot(key[0], key[1], message_id)
         if snapshot is None or not snapshot.own:
             followup_sessions.pop(key, None)
+            other_participant_conversation_anchors.pop(key, None)
             return None
+        if other_participant_conversation_anchors.get(key) != int(message_id):
+            other_participant_conversation_anchors.pop(key, None)
         return int(message_id)
 
     def open_followup_session(chat_id, thread_id, message_id):
@@ -807,7 +814,10 @@ async def run(cfg, send=False, show_drafts=False):
         for key, (expires_at, _anchor_id) in tuple(followup_sessions.items()):
             if expires_at <= now:
                 followup_sessions.pop(key, None)
-        followup_sessions[(int(chat_id), int(thread_id))] = (
+                other_participant_conversation_anchors.pop(key, None)
+        key = (int(chat_id), int(thread_id))
+        other_participant_conversation_anchors.pop(key, None)
+        followup_sessions[key] = (
             now + FOLLOWUP_IDLE_TTL_SECONDS, message_id,
         )
 
@@ -2550,14 +2560,40 @@ async def run(cfg, send=False, show_drafts=False):
                 return True
 
             conversation_anchor_id = None
+            active_anchor_id = None
             if (not reasons and str(message.message or "").strip()
                     and getattr(message, "action", None) is None
                     and not has_url_candidate(
                         message.message or "", message.entities or [],
                     )):
-                conversation_anchor_id = active_followup_anchor(
+                active_anchor_id = active_followup_anchor(
                     ev.chat_id, thread_key(message),
                 )
+                # Unaddressed replies belong to their actual parent. During a
+                # follow-up session, keep the bot out of a participant-to-
+                # participant exchange once a known name starts that exchange.
+                if active_anchor_id is not None and reply_id is None:
+                    followup_key = (int(ev.chat_id), thread_key(message))
+                    if begins_with_participant_address(
+                            message.message or "", people_artifact):
+                        other_participant_conversation_anchors[followup_key] = (
+                            active_anchor_id
+                        )
+                    if (other_participant_conversation_anchors.get(followup_key)
+                            == active_anchor_id):
+                        if reject_stale_intake():
+                            return
+                        if not state.claim(
+                                ev.chat_id, message.id, "", "skip",
+                                kind="ordinary"):
+                            _log_ordinary("duplicate_message", task_id)
+                        else:
+                            _log_ordinary(
+                                "conversation_addressed_to_participant", task_id,
+                            )
+                        return
+                    if reply_id is None:
+                        conversation_anchor_id = active_anchor_id
 
             if reasons or reply_id or action_route or conversation_anchor_id is not None:
                 if not context_added:
@@ -2654,6 +2690,25 @@ async def run(cfg, send=False, show_drafts=False):
                 if ("reply" not in reasons and parent is not None
                         and getattr(parent, "sender_id", None) == own_id):
                     reasons.append("reply")
+                    other_participant_conversation_anchors.pop(
+                        (int(ev.chat_id), thread_key(message)), None,
+                    )
+                elif (not reasons and parent is not None
+                      and getattr(parent, "sender_id", None) != own_id
+                      and active_anchor_id is not None):
+                    other_participant_conversation_anchors[
+                        (int(ev.chat_id), thread_key(message))
+                    ] = active_anchor_id
+                    if reject_stale_intake():
+                        return
+                    if not state.claim(
+                            ev.chat_id, message.id, "", "skip", kind="ordinary"):
+                        _log_ordinary("duplicate_message", task_id)
+                    else:
+                        _log_ordinary(
+                            "conversation_addressed_to_participant", task_id,
+                        )
+                    return
 
             if is_addressed_identity_question(
                 reasons, message,
